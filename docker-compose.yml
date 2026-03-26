@@ -1,0 +1,107 @@
+version: "3.9"
+
+# ─── SRS Streaming Stack ───────────────────────────────────────────────────────
+#
+# Services:
+#   srs    — SRS realtime media server (RTMP / HLS / HTTP-FLV / WebRTC / DVR)
+#   hooks  — Python/Flask HTTP callback server (publish auth, DVR post-process)
+#
+# Quick start:
+#   cp .env.example .env   # edit as needed
+#   docker compose up -d
+#
+# Stream to:   rtmp://localhost:1935/live/<stream_key>
+# Play HLS:    http://localhost:8080/live/<stream_key>.m3u8
+# Play FLV:    http://localhost:8080/live/<stream_key>.flv
+# API:         http://localhost:1985/api/v1/...
+# Console:     http://localhost:8080/console
+
+services:
+
+  # ── SRS media server ────────────────────────────────────────────────────────
+  srs:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: srs-server:latest
+    container_name: srs
+    restart: unless-stopped
+    ports:
+      - "${RTMP_PORT:-1935}:1935"       # RTMP ingest
+      - "${HTTP_PORT:-8080}:8080"       # HLS / HTTP-FLV / console
+      - "${API_PORT:-1985}:1985"        # HTTP API
+      - "${WEBRTC_PORT:-8000}:8000/udp" # WebRTC (WHIP/WHEP)
+    environment:
+      - CANDIDATE=${CANDIDATE:-127.0.0.1}
+    volumes:
+      - ./conf/srs.conf:/usr/local/srs/conf/srs.conf:ro
+      - srs_dvr:/usr/local/srs/dvr
+      - srs_logs:/usr/local/srs/objs/logs
+    networks:
+      - srs_net
+    depends_on:
+      hooks:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:1985/api/v1/versions"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ── HTTP hook server ─────────────────────────────────────────────────────────
+  hooks:
+    build:
+      context: .
+      dockerfile: Dockerfile.hooks
+    image: srs-hooks:latest
+    container_name: srs-hooks
+    restart: unless-stopped
+    ports:
+      - "${HOOK_PORT:-5000}:5000"
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - HOOK_PORT=5000
+      - STREAM_SECRET=${STREAM_SECRET:-}
+      - EVENT_LOG=/app/logs/events.jsonl
+      - DVR_OUTPUT_DIR=/app/dvr
+      - FFMPEG_BIN=ffmpeg
+      - S3_BUCKET=${S3_BUCKET:-}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+    volumes:
+      - srs_dvr:/app/dvr                   # shared DVR volume with SRS
+      - hook_logs:/app/logs
+    networks:
+      - srs_net
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:5000/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+# ── Named volumes ──────────────────────────────────────────────────────────────
+volumes:
+  srs_dvr:
+    driver: local
+  srs_logs:
+    driver: local
+  hook_logs:
+    driver: local
+
+# ── Network ────────────────────────────────────────────────────────────────────
+networks:
+  srs_net:
+    driver: bridge

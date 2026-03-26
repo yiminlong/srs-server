@@ -1,0 +1,37 @@
+# ── SRS Hook server (Python / Flask) ──────────────────────────────────────────
+# Receives HTTP callbacks from SRS and handles publish auth + DVR processing.
+#
+# Build:
+#   docker build -f Dockerfile.hooks -t srs-hooks .
+
+FROM python:3.12-slim
+
+LABEL description="SRS HTTP hook server"
+
+# Install ffmpeg for DVR remux and aws-cli for optional S3 upload
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg \
+        awscli \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python dependencies first (layer cache)
+COPY hooks/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy hook source
+COPY hooks/ /app/
+
+# Create log and DVR output directories
+RUN mkdir -p /app/logs /app/dvr
+
+EXPOSE 5000
+
+ENV LOG_LEVEL=INFO \
+    HOOK_PORT=5000 \
+    EVENT_LOG=/app/logs/events.jsonl \
+    DVR_OUTPUT_DIR=/app/dvr \
+    FFMPEG_BIN=ffmpeg
+
+CMD ["gunicorn", "--workers=2", "--bind=0.0.0.0:5000", "--access-logfile=-", "hook_server:app"]
